@@ -1,9 +1,9 @@
 <div align="center">
   <a href="https://utc2.edu.vn">
-    <img src="https://raw.githubusercontent.com/devprostudio/devprostudio.github.io/main/utc2_logo.svg" alt="UTC2 Logo" width="200" height="200" style="margin-right: 20px">
+    <img src="https://i.imgur.com/1fsGHqP.png" alt="UTC2 Logo" width="200" height="200" style="margin-right: 20px">
   </a>
   <a href="https://fb.com/work.devpros">
-    <img src="https://raw.githubusercontent.com/devprostudio/devprostudio.github.io/main/devpros_logo.svg" alt="DevPros Logo" width="200" height="200" style="margin-left: 20px">
+    <img src="https://i.imgur.com/L6EPQVD.jpeg" alt="DevPros Logo" width="200" height="200" style="margin-left: 20px">
   </a>
 </div>
 
