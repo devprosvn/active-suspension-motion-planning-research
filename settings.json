@@ -1,0 +1,54 @@
+{
+  "SeeDocsAt": "https://github.com/Microsoft/AirSim/blob/master/docs/settings.md",
+  "SettingsVersion": 1.2,
+  "SimMode": "Car",
+  "ViewMode": "",
+  "ClockSpeed": 1.0,
+  "Vehicles": {
+    "SUVCar": {
+      "VehicleType": "PhysXCar",
+      "DefaultVehicleState": "Armed",
+      "EnableCollisionPassthrogh": false,
+      "EnableCollisions": true,
+      "AllowAPIAlways": true,
+      "Cameras": {
+        "center_camera": {
+          "CaptureSettings": [
+            {
+              "ImageType": 0,
+              "Width": 320,
+              "Height": 240,
+              "FOV_Degrees": 90
+            }
+          ],
+          "X": 0.2, "Y": 0, "Z": 0.5,
+          "Pitch": 0, "Roll": 0, "Yaw": 0
+        },
+        "left_camera": {
+          "CaptureSettings": [
+            {
+              "ImageType": 0,
+              "Width": 320,
+              "Height": 240,
+              "FOV_Degrees": 90
+            }
+          ],
+          "X": 0.2, "Y": -0.2, "Z": 0.5,
+          "Pitch": 0, "Roll": 0, "Yaw": -30
+        },
+        "right_camera": {
+          "CaptureSettings": [
+            {
+              "ImageType": 0,
+              "Width": 320,
+              "Height": 240,
+              "FOV_Degrees": 90
+            }
+          ],
+          "X": 0.2, "Y": 0.2, "Z": 0.5,
+          "Pitch": 0, "Roll": 0, "Yaw": 30
+        }
+      }
+    }
+  }
+}
