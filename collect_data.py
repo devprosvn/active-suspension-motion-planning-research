@@ -1,189 +1,214 @@
-import airsim
-import numpy as np
-import os
-import time
-import cv2
-import pandas as pd
-from datetime import datetime
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+AirSim v1.2.0 – Data Collector for the “MountainLandscape” map
+• Python ≥ 3.7        • pygame 2.1.3
+• Supports forward & reverse driving
+• Captures RGB frames from three cameras at a fixed rate
 
+Keys
+────
+W / ↑   : drive forward
+S / ↓   : reverse (automatic gear--1)
+A / ←   : steer left
+D / →   : steer right
+R       : start / pause recording
+Q       : quit
+"""
+
+# ────────────────────────── imports ──────────────────────────
+import os, time, cv2, numpy as np, pandas as pd
+from datetime import datetime
+import airsim
+import pygame
+
+# ───────────────────────── settings check ────────────────────
+REQ_PYGAME_VER = (2, 1, 3)
+if pygame.version.vernum[:3] != REQ_PYGAME_VER:
+    print(f"⚠️  Recommended pygame {'.'.join(map(str, REQ_PYGAME_VER))}, "
+          f"but running {pygame.version.ver}.  "
+          f"If keyboard input misbehaves, install with "
+          f"`pip install pygame==2.1.3`.")
+
+# ─────────────────────── DataCollector ───────────────────────
 class DataCollector:
-    def __init__(self, save_dir='collected_data'):
-        # Connect to AirSim
+    def __init__(self, save_dir: str = "collected_data"):
+        # 1 – connect to AirSim
         self.client = airsim.CarClient()
         self.client.confirmConnection()
         self.client.enableApiControl(True)
-        
-        # Reset car
         self.client.reset()
-        
-        # Create directory for saving data
-        self.save_dir = save_dir
-        self.images_dir = os.path.join(self.save_dir, 'images')
+
+        # 2 – directories
+        self.save_dir   = save_dir
+        self.images_dir = os.path.join(save_dir, "images")
         os.makedirs(self.images_dir, exist_ok=True)
-        
-        # Initialize data log
-        self.data_log = []
-        
-        # Camera names
-        self.camera_names = ['center_camera', 'left_camera', 'right_camera']
-        
-        print("DataCollector initialized. Ready to collect data.")
-    
+
+        # 3 – buffers
+        self.data_log = []                 # list of dicts
+
+        # 4 – cameras
+        self.cam_names = ["center", "left", "right"]
+        self.cam_ids   = {"center": 0, "left": 1, "right": 2}
+
+        print("✅ DataCollector ready (Python 3.7+, pygame 2.1.3).")
+
+    # ───────────────────── frame capture ──────────────────────
     def collect_frame(self):
-        # Get car state
-        car_state = self.client.getCarState()
-        
-        # Get steering, throttle, and speed
-        steering = car_state.kinematics_estimated.orientation.z_val
-        # In AirSim 1.2.0, we need to get current control inputs through a different approach
-        # since getCarControls() and controls attribute may not be available
-        # For data collection, we'll note that throttle input isn't directly accessible
-        throttle = 0.0  # Placeholder since direct throttle input isn't accessible in this API version
-        speed = car_state.speed
-        
-        # Get timestamp
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        
-        # Collect images from all cameras
-        images = {}
-        camera_id_map = {'center_camera': 0, 'left_camera': 1, 'right_camera': 2}
-        for camera_name in self.camera_names:
-            camera_id = camera_id_map.get(camera_name, 0)
-            response = self.client.simGetImages([airsim.ImageRequest(camera_id, airsim.ImageType.Scene, False, False)])[0]
-            img1d = np.fromstring(response.image_data_uint8, dtype=np.uint8)
-            
-            # Calculate dimensions based on actual data size (assuming 3 channels for RGB)
-            if img1d.size % 3 == 0:
-                total_pixels = img1d.size // 3
-                # Try to find reasonable dimensions if possible
-                height = response.height if response.height > 0 else int(np.sqrt(total_pixels))
-                width = response.width if response.width > 0 else (total_pixels // height)
-                if height * width != total_pixels:
-                    # Adjust if the dimensions are still incorrect
-                    height = int(np.sqrt(total_pixels))
-                    width = total_pixels // height
-                    if height * width != total_pixels:
-                        # Final attempt to make dimensions match
-                        for h in range(height, height-100, -1):
-                            if total_pixels % h == 0:
-                                height = h
-                                width = total_pixels // height
-                                break
-                        if height * width != total_pixels:
-                            print(f"Warning: Cannot find valid dimensions for {camera_name}. Skipping frame.")
-                            continue
-                img_rgb = img1d.reshape(height, width, 3)
-            else:
-                print(f"Warning: Invalid image data size for {camera_name}. Size {img1d.size} not divisible by 3. Skipping frame.")
-                continue
-            
-            img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
-            
-            # Save image
-            img_filename = f"{camera_name}_{timestamp}.png"
-            img_path = os.path.join(self.images_dir, img_filename)
-            cv2.imwrite(img_path, img_bgr)
-            
-            images[camera_name] = img_filename
-        
-        # Check if we have images from all cameras before logging
-        if len(images) != len(self.camera_names):
-            print("Warning: Could not collect images from all cameras. Skipping this frame.")
-            return None
-        
-        # Log data
-        log_entry = {
-            'timestamp': timestamp,
-            'center_image': images['center_camera'],
-            'left_image': images['left_camera'],
-            'right_image': images['right_camera'],
-            'steering': steering,
-            'throttle': throttle,
-            'speed': speed
-        }
-        
-        self.data_log.append(log_entry)
-        return log_entry
-    
-    def save_data_log(self):
-        # Save data log to CSV
-        df = pd.DataFrame(self.data_log)
-        csv_path = os.path.join(self.save_dir, 'driving_log.csv')
-        df.to_csv(csv_path, index=False)
-        print(f"Data log saved to {csv_path}")
-    
-    def manual_data_collection(self, duration_seconds=300, sample_freq_hz=10):
-        """
-        Collect data while user manually controls the car using keyboard inputs in AirSim
-        """
-        print(f"Starting manual data collection for {duration_seconds} seconds...")
-        print("Please control the car using keyboard in the AirSim window.")
-        print("Press 'q' in the OpenCV window to stop data collection early.")
-        
-        # Create a window to show the center camera feed
-        cv2.namedWindow('Center Camera', cv2.WINDOW_NORMAL)
-        
-        start_time = time.time()
-        sample_interval = 1.0 / sample_freq_hz
-        next_sample_time = start_time
-        
+        """Grab one frame from the three cameras and append to the log."""
+        state   = self.client.getCarState()
+        stamp   = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+
+        throttle = self.cur_ctrls.throttle
+        steering = self.cur_ctrls.steering
+        speed    = state.speed
+
+        # request three images in one call
+        reqs  = [airsim.ImageRequest(self.cam_ids[c], airsim.ImageType.Scene,
+                                     False, False) for c in self.cam_names]
+        resps = self.client.simGetImages(reqs)
+
+        imgs = {}
+        for name, resp in zip(self.cam_names, resps):
+            buf = np.frombuffer(resp.image_data_uint8, dtype=np.uint8)
+            if buf.size == 0:
+                print(f"⚠️ Empty frame from {name}; skipping.")
+                return None
+            rgb = buf.reshape(192, 256, 3)
+            bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+            fname = f"{name}_{stamp}.png"
+            cv2.imwrite(os.path.join(self.images_dir, fname), bgr)
+            imgs[name] = fname
+
+        self.data_log.append(dict(timestamp=stamp,
+                                  center_image=imgs["center"],
+                                  left_image  =imgs["left"],
+                                  right_image =imgs["right"],
+                                  steering=steering,
+                                  throttle=throttle,
+                                  speed=speed))
+        return imgs
+
+    # ─────────────────────── helpers ──────────────────────────
+    @staticmethod
+    def _init_pygame():
+        pygame.init()
+        pygame.display.set_caption("AirSim Keyboard Control – pygame 2.1.3")
+        screen = pygame.display.set_mode((420, 90))   # small HUD
+        font   = pygame.font.SysFont("consolas", 16)
+        return screen, font
+
+    def _save_csv(self):
+        if not self.data_log:
+            print("⚠️ No data captured.")
+            return
+        out = os.path.join(self.save_dir, "driving_log.csv")
+        pd.DataFrame(self.data_log).to_csv(out, index=False)
+        print(f"💾 Log saved → {out}")
+
+    # ───────────────── manual collection ──────────────────────
+    def manual_data_collection(self, duration_s: int = 300, freq_hz: int = 10):
+        screen, font = self._init_pygame()
+
+        # initialise vehicle controls
+        self.cur_ctrls = airsim.CarControls()
+        self.cur_ctrls.handbrake = False
+        self.client.setCarControls(self.cur_ctrls)
+
+        key_on = dict(fwd=False, back=False, left=False, right=False)
+        recording = False
+        print("W/A/S/D or arrows to drive | R to record | Q to quit")
+
+        dt      = 1.0 / freq_hz
+        t_next  = time.time() + dt
+        t_end   = time.time() + duration_s
+
         try:
-            while time.time() - start_time < duration_seconds:
-                current_time = time.time()
-                
-                # Check if it's time to collect a sample
-                if current_time >= next_sample_time:
-                    # Collect frame data
-                    frame_data = self.collect_frame()
-                    # Skip display if no frame data was collected
-                    if frame_data is None:
-                        next_sample_time = current_time + sample_interval
-                        continue
-                    
-                    # Display center camera image
-                    center_img_path = os.path.join(self.images_dir, frame_data['center_image'])
-                    center_img = cv2.imread(center_img_path)
-                    
-                    # Add telemetry info to the image
-                    info_text = f"Steering: {frame_data['steering']:.4f}, Throttle: {frame_data['throttle']:.2f}, Speed: {frame_data['speed']:.2f}"
-                    cv2.putText(center_img, info_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                    
-                    cv2.imshow('Center Camera', center_img)
-                    
-                    # Calculate next sample time
-                    next_sample_time = current_time + sample_interval
-                
-                # Check for key press to exit early
-                if cv2.waitKey(1) & 0xFF == ord('q'):
-                    print("Data collection stopped early by user.")
-                    break
-                
-                # Small sleep to prevent CPU overload
-                time.sleep(0.01)
-        
+            while time.time() < t_end:
+
+                # ---------- keyboard events ----------
+                for ev in pygame.event.get():
+                    if ev.type == pygame.QUIT:
+                        raise KeyboardInterrupt
+                    if ev.type in (pygame.KEYDOWN, pygame.KEYUP):
+                        pressed = ev.type == pygame.KEYDOWN
+                        if ev.key in (pygame.K_w, pygame.K_UP):
+                            key_on["fwd"] = pressed
+                        elif ev.key in (pygame.K_s, pygame.K_DOWN):
+                            key_on["back"] = pressed
+                        elif ev.key in (pygame.K_a, pygame.K_LEFT):
+                            key_on["left"] = pressed
+                        elif ev.key in (pygame.K_d, pygame.K_RIGHT):
+                            key_on["right"] = pressed
+                        elif ev.key == pygame.K_r and pressed:
+                            recording = not recording
+                        elif ev.key == pygame.K_q and pressed:
+                            raise KeyboardInterrupt
+                # --------------------------------------
+
+                # ---------- vehicle control logic ----------
+                c = self.cur_ctrls   # alias for brevity
+
+                # steering (works both forward & reverse)
+                c.steering = (-0.5 if key_on["left"]
+                              else 0.5 if key_on["right"]
+                              else 0.0)
+
+                if key_on["back"]:                 # ---- reverse mode ----
+                    c.is_manual_gear = True
+                    c.manual_gear    = -1          # gear -1 = reverse
+                    c.throttle       = 0.5
+                    c.brake          = 0.0
+                elif key_on["fwd"]:                # ---- drive forward ---
+                    c.is_manual_gear = False       # auto gear
+                    c.throttle       = 0.7
+                    c.brake          = 0.0
+                else:                              # ---- idle / stop -----
+                    c.is_manual_gear = False
+                    c.throttle       = 0.0
+                    c.brake          = 0.2         # light brake to hold
+
+                self.client.setCarControls(c)
+                # ----------------------------------------
+
+                # ---------- logging ----------
+                if recording and time.time() >= t_next:
+                    self.collect_frame()
+                    t_next += dt
+
+                # ---------- HUD ----------
+                gear = "R" if c.is_manual_gear and c.manual_gear == -1 else "D"
+                status = "REC" if recording else "PAUSE"
+                hud = f"{status} | {gear}  thr={c.throttle:.1f}  brk={c.brake:.1f}  steer={c.steering:.1f}"
+                screen.fill((40, 40, 40))
+                screen.blit(font.render(hud,
+                                        True,
+                                        (0, 220, 0) if recording else (220, 220, 0)),
+                            (10, 30))
+                pygame.display.flip()
+                pygame.time.wait(10)   # ≈ 100 Hz main loop
+
+        except KeyboardInterrupt:
+            print("⏹️ Stopped by user.")
+
         finally:
-            # Save collected data
-            self.save_data_log()
-            cv2.destroyAllWindows()
-            print("Data collection completed.")
-    
+            # ensure safe stop & save log
+            self.cur_ctrls.throttle = 0
+            self.cur_ctrls.brake    = 1
+            self.cur_ctrls.steering = 0
+            self.client.setCarControls(self.cur_ctrls)
+            self._save_csv()
+            pygame.quit()
+
+    # ───────────────────────── cleanup ─────────────────────────
     def cleanup(self):
-        # Return control to user
         self.client.enableApiControl(False)
-        print("Control returned to user. DataCollector cleaned up.")
+        print("✅ API control released.")
 
-
+# ──────────────────────────── main ───────────────────────────
 if __name__ == "__main__":
-    # Create data collector
-    collector = DataCollector(save_dir='collected_data')
-    
+    dc = DataCollector()
     try:
-        # Collect data for 5 minutes (300 seconds) at 10Hz
-        collector.manual_data_collection(duration_seconds=300, sample_freq_hz=10)
-    
-    except KeyboardInterrupt:
-        print("Data collection interrupted by user.")
-    
+        dc.manual_data_collection(duration_s=300, freq_hz=10)
     finally:
-        # Clean up
-        collector.cleanup()
+        dc.cleanup()

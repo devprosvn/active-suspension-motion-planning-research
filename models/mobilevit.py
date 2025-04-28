@@ -41,7 +41,7 @@ class MobileViTAttention(nn.Module):
         self.layers = nn.ModuleList([])
         for _ in range(depth):
             self.layers.append(nn.ModuleList([
-                nn.LayerNorm(dim),
+                nn.LayerNorm(dim),  
                 nn.MultiheadAttention(embed_dim=dim, num_heads=heads),
                 nn.LayerNorm(dim),
                 nn.Sequential(
@@ -52,6 +52,12 @@ class MobileViTAttention(nn.Module):
             ]))
 
     def forward(self, x):
+        # Ensure x is 2D: [batch_size, sequence_length, embedding_dim]
+        if len(x.shape) == 4:
+            # If input is 4D (batch, channels, height, width), reshape
+            batch_size, channels, height, width = x.shape
+            x = x.permute(0, 2, 3, 1).reshape(batch_size, height * width, channels)
+        
         for norm1, attn, norm2, mlp in self.layers:
             x_norm = norm1(x)
             attn_out, _ = attn(x_norm, x_norm, x_norm)
@@ -64,12 +70,18 @@ class MobileViTBlock(nn.Module):
     def __init__(self, dim, depth, channel, kernel_size, patch_size, mlp_dim, heads=4, dim_head=64):
         super().__init__()
         self.ph, self.pw = patch_size
+        self.dim = dim  # Store original dim for rearranging later
         
         self.conv1 = nn.Conv2d(channel, channel, kernel_size=kernel_size, padding=kernel_size//2)
         self.conv2 = nn.Conv2d(channel, dim, kernel_size=1)
         
-        self.transformer = MobileViTAttention(dim=dim, depth=depth, heads=heads, dim_head=dim_head, mlp_dim=mlp_dim)
+        # Calculate the actual attention dimension after patch unfolding
+        attention_dim = self.ph * self.pw * dim
         
+        # Use the correct attention dimension for the transformer
+        self.transformer = MobileViTAttention(dim=attention_dim, depth=depth, heads=heads, dim_head=dim_head, mlp_dim=mlp_dim*2)
+        
+        # The conv3 needs to take the unfolded dimension as input
         self.conv3 = nn.Conv2d(dim, channel, kernel_size=1)
         self.conv4 = nn.Conv2d(2 * channel, channel, kernel_size=kernel_size, padding=kernel_size//2)
     
@@ -80,9 +92,18 @@ class MobileViTBlock(nn.Module):
         
         # Global representations
         _, _, h, w = y.shape
+        
+        # Save original tensor for residual connection
+        y_orig = y
+        
+        # Unfold patches for transformer
         y = rearrange(y, 'b c (h ph) (w pw) -> b (h w) (ph pw c)', ph=self.ph, pw=self.pw)
+        
+        # Apply transformer to unfolded patches
         y = self.transformer(y)
-        y = rearrange(y, 'b (h w) (ph pw c) -> b c (h ph) (w pw)', h=h//self.ph, w=w//self.pw, ph=self.ph, pw=self.pw)
+        
+        # Fold patches back to original spatial dimensions
+        y = rearrange(y, 'b (h w) (ph pw c) -> b c (h ph) (w pw)', h=h//self.ph, w=w//self.pw, ph=self.ph, pw=self.pw, c=self.dim)
         
         # Fusion
         y = self.conv3(y)
@@ -114,12 +135,14 @@ class MobileViT(nn.Module):
         
         # MobileViT blocks
         self.mvit = nn.ModuleList([])
-        self.mvit.append(MobileViTBlock(dims[0], depths[0], channels[5], kernel_size, patch_size, int(dims[0]*2)))
-        self.mvit.append(MobileViTBlock(dims[1], depths[1], channels[5], kernel_size, patch_size, int(dims[1]*4)))
-        self.mvit.append(MobileViTBlock(dims[2], depths[2], channels[6], kernel_size, patch_size, int(dims[2]*4)))
+        # First two blocks operate at 96 channels
+        self.mvit.append(MobileViTBlock(dims[0], depths[0], channels[5], kernel_size, patch_size, int(dims[0]*2), heads=4, dim_head=64))
+        self.mvit.append(MobileViTBlock(dims[1], depths[1], channels[5], kernel_size, patch_size, int(dims[1]*4), heads=4, dim_head=64))
+        # Third block should still receive 96-channel input; it will keep channel size before up-projection
+        self.mvit.append(MobileViTBlock(dims[2], depths[2], channels[5], kernel_size, patch_size, int(dims[2]*4), heads=4, dim_head=64))
         
-        # Final layers
-        self.conv2 = nn.Conv2d(channels[6], channels[6], kernel_size=1)
+        # Final layers – project from 96 → 384, then pool+fc
+        self.conv2 = nn.Conv2d(channels[5], channels[6], kernel_size=1)
         self.pool = nn.AdaptiveAvgPool2d(1)
         self.fc = nn.Linear(channels[6], num_classes)
         

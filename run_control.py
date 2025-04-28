@@ -6,9 +6,91 @@ import time
 import cv2
 from collections import deque
 import argparse
+import pandas as pd
+from torch.utils.data import Dataset, DataLoader
+from torchvision import transforms
 
 from models.mobilevit import VisionTemporalModel
 from airsim_env import SAC, AirSimCarEnv, ReplayBuffer
+
+# Custom dataset for driving data
+class DrivingDataset(Dataset):
+    def __init__(self, csv_file, root_dir, transform=None):
+        if not os.path.exists(csv_file):
+            print(f"CSV file not found at: {csv_file}")
+            self.data_frame = pd.DataFrame()
+        else:
+            self.data_frame = pd.read_csv(csv_file)
+            print(f"CSV file loaded from: {csv_file}, found {len(self.data_frame)} samples")
+        
+        self.root_dir = root_dir
+        self.transform = transform
+        
+        if not os.path.exists(root_dir):
+            print(f"Root directory not found at: {root_dir}")
+        
+        # Filter out invalid image paths
+        valid_rows = []
+        for idx in range(len(self.data_frame)):
+            row = self.data_frame.iloc[idx]
+            # First, try the direct path
+            center_path = os.path.join(self.root_dir, row['center_image'])
+            left_path = os.path.join(self.root_dir, row['left_image'])
+            right_path = os.path.join(self.root_dir, row['right_image'])
+            
+            # If not found, try under 'images' subdirectory
+            if not (os.path.exists(center_path) and os.path.exists(left_path) and os.path.exists(right_path)):
+                center_path = os.path.join(self.root_dir, 'images', row['center_image'])
+                left_path = os.path.join(self.root_dir, 'images', row['left_image'])
+                right_path = os.path.join(self.root_dir, 'images', row['right_image'])
+                
+            if os.path.exists(center_path) and os.path.exists(left_path) and os.path.exists(right_path):
+                valid_rows.append(idx)
+            else:
+                print(f"Skipping sample {idx}: Images not found at {center_path}, {left_path}, or {right_path}")
+        self.data_frame = self.data_frame.iloc[valid_rows].reset_index(drop=True)
+        print(f"Loaded {len(self.data_frame)} valid data samples")
+    
+    def __len__(self):
+        return len(self.data_frame)
+    
+    def __getitem__(self, idx):
+        if torch.is_tensor(idx):
+            idx = idx.tolist()
+        
+        # Load images
+        row = self.data_frame.iloc[idx]
+        # First, try the direct path
+        center_path = os.path.join(self.root_dir, row['center_image'])
+        left_path = os.path.join(self.root_dir, row['left_image'])
+        right_path = os.path.join(self.root_dir, row['right_image'])
+        
+        # If not found, try under 'images' subdirectory
+        if not (os.path.exists(center_path) and os.path.exists(left_path) and os.path.exists(right_path)):
+            center_path = os.path.join(self.root_dir, 'images', row['center_image'])
+            left_path = os.path.join(self.root_dir, 'images', row['left_image'])
+            right_path = os.path.join(self.root_dir, 'images', row['right_image'])
+        
+        center_img = cv2.imread(center_path)
+        # No need to load left and right images since we're only using center
+        if center_img is None:
+            raise ValueError(f"Failed to load center image at index {idx} from path {center_path}")
+        
+        center_img = cv2.cvtColor(center_img, cv2.COLOR_BGR2RGB)
+        
+        # Apply transform to center image only
+        if self.transform:
+            center_img = self.transform(center_img)
+        
+        # Use only center image with sequence dimension
+        images = center_img.unsqueeze(0)  # Shape: (1, C, H, W), where C=3 for RGB
+        
+        # Get steering and throttle
+        steering = float(row['steering'])
+        throttle = float(row['throttle'])
+        labels = torch.tensor([steering, throttle], dtype=torch.float32)
+        
+        return images, labels
 
 def train_sac(env, agent, replay_buffer, num_episodes=1000, batch_size=64, updates_per_step=1, 
               save_interval=100, model_dir='saved_models', eval_interval=10):
@@ -190,138 +272,90 @@ def train_mobilevit_supervised(data_dir='collected_data', model_dir='saved_model
     """
     Train the MobileViT model using supervised learning on collected data
     """
-    import pandas as pd
-    from torch.utils.data import Dataset, DataLoader
-    from torchvision import transforms
-    
-    # Custom dataset for driving data
-    class DrivingDataset(Dataset):
-        def __init__(self, csv_file, root_dir, transform=None):
-            self.data_frame = pd.read_csv(csv_file)
-            self.root_dir = root_dir
-            self.transform = transform
-        
-        def __len__(self):
-            return len(self.data_frame)
-        
-        def __getitem__(self, idx):
-            # Get image paths
-            center_img_path = os.path.join(self.root_dir, 'images', self.data_frame.iloc[idx, 1])
-            
-            # Load images
-            center_img = cv2.imread(center_img_path)
-            center_img = cv2.cvtColor(center_img, cv2.COLOR_BGR2RGB)
-            
-            # Apply transformations
-            if self.transform:
-                center_img = self.transform(center_img)
-            
-            # Get steering angle
-            steering = self.data_frame.iloc[idx, 4]
-            
-            # Get throttle and speed
-            throttle = self.data_frame.iloc[idx, 5]
-            speed = self.data_frame.iloc[idx, 6]
-            
-            return {
-                'image': center_img,
-                'steering': steering,
-                'throttle': throttle,
-                'speed': speed
-            }
-    
-    # Set up transformations
-    transform = transforms.Compose([
-        transforms.ToPILImage(),
-        transforms.Resize((240, 320)),
+    # Define data transforms
+    data_transform = transforms.Compose([
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
     
-    # Create dataset and dataloader
-    dataset = DrivingDataset(
+    # Create datasets
+    train_dataset = DrivingDataset(
         csv_file=os.path.join(data_dir, 'driving_log.csv'),
         root_dir=data_dir,
-        transform=transform
+        transform=data_transform
     )
     
-    train_size = int(0.8 * len(dataset))
-    val_size = len(dataset) - train_size
-    train_dataset, val_dataset = torch.utils.data.random_split(dataset, [train_size, val_size])
+    if len(train_dataset) == 0:
+        raise ValueError("No valid data samples found. Cannot proceed with training.")
     
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=4)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=4)
+    train_size = int(0.8 * len(train_dataset))
+    val_size = len(train_dataset) - train_size
+    train_dataset, val_dataset = torch.utils.data.random_split(train_dataset, [train_size, val_size])
     
-    # Create model
+    # Create data loaders
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=True)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=4, pin_memory=True)
+    
+    # Initialize model
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = VisionTemporalModel(seq_len=1, vision_features=128, state_features=2).to(device)
+    model = VisionTemporalModel().to(device)
     
     # Define loss function and optimizer
     criterion = torch.nn.MSELoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
     
-    # Training loop
+    # Create directory for saving models
+    os.makedirs(model_dir, exist_ok=True)
+    best_val_loss = float('inf')
+    
     print(f"Starting supervised training for {num_epochs} epochs...")
     
     for epoch in range(num_epochs):
         # Training phase
         model.train()
         train_loss = 0.0
-        
         for batch in train_loader:
-            # Get data
-            images = batch['image'].to(device)
-            steering = batch['steering'].float().to(device)
-            throttle = batch['throttle'].float().to(device)
-            speed = batch['speed'].float().to(device)
+            images = batch[0].to(device)  # Shape: (batch, C, H, W)
+            labels = batch[1][:, 0].to(device)  # Use steering only, shape: (batch,)
             
-            # Prepare input
-            states = torch.stack([throttle, speed], dim=1).unsqueeze(1)  # [batch_size, 1, 2]
-            images = images.unsqueeze(1)  # [batch_size, 1, 3, H, W]
+            # Create dummy states matching (batch, seq_len, state_features)
+            seq_len = images.shape[1] if images.ndim == 5 else 1
+            states = torch.zeros(images.shape[0], seq_len, 3, device=device)
             
-            # Forward pass
             optimizer.zero_grad()
             outputs = model(images, states)
-            
-            # Compute loss
-            loss = criterion(outputs, steering)
-            
-            # Backward pass and optimize
+            loss = criterion(outputs, labels)
             loss.backward()
             optimizer.step()
             
             train_loss += loss.item()
         
+        avg_train_loss = train_loss / len(train_loader)
+        
         # Validation phase
         model.eval()
         val_loss = 0.0
-        
         with torch.no_grad():
             for batch in val_loader:
-                # Get data
-                images = batch['image'].to(device)
-                steering = batch['steering'].float().to(device)
-                throttle = batch['throttle'].float().to(device)
-                speed = batch['speed'].float().to(device)
-                
-                # Prepare input
-                states = torch.stack([throttle, speed], dim=1).unsqueeze(1)  # [batch_size, 1, 2]
-                images = images.unsqueeze(1)  # [batch_size, 1, 3, H, W]
-                
-                # Forward pass
+                images = batch[0].to(device)
+                labels = batch[1][:, 0].to(device)  # steering only
+                seq_len = images.shape[1] if images.ndim == 5 else 1
+                states = torch.zeros(images.shape[0], seq_len, 3, device=device)
                 outputs = model(images, states)
-                
-                # Compute loss
-                loss = criterion(outputs, steering)
+                loss = criterion(outputs, labels)
                 val_loss += loss.item()
         
-        # Print epoch results
-        print(f"Epoch {epoch+1}/{num_epochs}: Train Loss = {train_loss/len(train_loader):.6f}, Val Loss = {val_loss/len(val_loader):.6f}")
+        avg_val_loss = val_loss / len(val_loader)
+        
+        print(f"Epoch {epoch+1}/{num_epochs}: Train Loss = {avg_train_loss:.6f}, Val Loss = {avg_val_loss:.6f}")
+        
+        # Save best model
+        if avg_val_loss < best_val_loss:
+            best_val_loss = avg_val_loss
+            torch.save(model.state_dict(), os.path.join(model_dir, 'best_model.pth'))
+            print(f"Saved best model with validation loss {best_val_loss:.6f}")
     
-    # Save model
-    os.makedirs(model_dir, exist_ok=True)
-    torch.save(model.state_dict(), os.path.join(model_dir, 'mobilevit_supervised.pth'))
-    print(f"Model saved to {os.path.join(model_dir, 'mobilevit_supervised.pth')}")
+    print("Training completed")
 
 
 if __name__ == "__main__":
